@@ -430,3 +430,112 @@ Lo que acabamos de construir se traduce en el siguiente comportamiento:
 4.  ¡Dale a **Play**!
 
 Ahora, cuando el objetivo esté lejos, la IA se pondrá a saltar. Cuando acerques el objetivo, dejará de saltar y comenzará a perseguirlo. ¡Exactamente como en el diagrama
+
+
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+
+
+¡Excelente observación! Tienes toda la razón. Este es un problema clásico y muy común cuando se implementan árboles de comportamiento, y has identificado el síntoma perfectamente.
+
+### **El Problema: ¿Por Qué No Espera?**
+
+El problema no está en tu `WaitTask` (que funciona perfecto como un temporizador), sino en la lógica de la **`Sequence`**.
+
+1.  **Frame 1:** La `Sequence` ejecuta el `Selector`. El `Selector` tiene éxito (porque el personaje se mueve o salta). La `Sequence` pasa a su siguiente hijo: `WaitTask`.
+2.  **`WaitTask` empieza a contar** y, como el tiempo aún no ha pasado, devuelve `false`.
+3.  Como `WaitTask` devolvió `false`, **toda la `Sequence` falla en ese frame**.
+4.  **Frame 2 (el siguiente `Update`):** El árbol se ejecuta de nuevo **desde el principio**. La `Sequence` vuelve a ejecutar el `Selector`, el personaje se mueve o salta OTRA VEZ, y solo después el `WaitTask` avanza un poquito más en su conteo.
+
+En resumen: **La acción se repite en cada frame porque la `Sequence` no tiene memoria. Reinicia su lógica en cada `Update`.**
+
+---
+
+### **La Solución: Una Secuencia con "Memoria" (`StatefulSequence`)**
+
+Para solucionar esto de una manera limpia y reutilizable (sin alterar el resto de tu arquitectura), crearemos una nueva clase que herede de `Sequence` pero que sea "inteligente". La llamaremos `StatefulSequence`.
+
+Esta secuencia recordará qué hijo fue el último que estaba "ocupado" (el que devolvió `false`) y, en el siguiente frame, continuará desde ese punto en lugar de empezar desde cero.
+
+**1. Crea la nueva clase `StatefulSequence`**
+
+Añade esta clase a tu archivo de nodos. Es idéntica a `Sequence`, pero con una pequeña variable para recordar su estado.
+
+```csharp
+// Añade esta clase a tu archivo de nodos (AI_Nodes.cs o Node.cs)
+
+public class StatefulSequence : Sequence
+{
+    private int _lastRunningChildIndex = 0; // La "memoria" de la secuencia
+
+    public StatefulSequence(List<Node> childrenNodes) : base(childrenNodes) { }
+
+    public override bool Execute(GameObject agent)
+    {
+        // Empezamos a iterar desde el último hijo que estaba "ocupado"
+        for (int i = _lastRunningChildIndex; i < children.Count; i++)
+        {
+            if (!children[i].Execute(agent))
+            {
+                // Si un hijo falla (como el WaitTask mientras espera),
+                // guardamos su índice y fallamos por ahora.
+                _lastRunningChildIndex = i;
+                return false;
+            }
+        }
+
+        // Si todos los hijos tuvieron éxito, reiniciamos la memoria para la próxima vez.
+        _lastRunningChildIndex = 0;
+        return true;
+    }
+}```
+
+**2. Actualiza el `AI_Controller` para que use la nueva secuencia**
+
+Este es el único cambio que necesitas hacer en tu controlador. Simplemente reemplaza `new Sequence(...)` por `new StatefulSequence(...)`.
+
+**Script: `AI_Controller.cs` (La única línea que cambia)**
+
+```csharp
+// ... (el resto del script igual)
+
+void Start()
+{
+    // ... (el resto del Start igual)
+    
+    // 4. La secuencia principal que une todo.
+    //    ¡Aquí está el cambio! Usamos la nueva secuencia con memoria.
+    var mainSequence = new StatefulSequence(new List<Node> // <- CAMBIO AQUÍ
+    {
+        mainSelector,
+        waitNode
+    });
+
+    // 5. El nodo raíz que inicia todo el árbol.
+    _behaviorTree = new Root(mainSequence);
+}
+
+// ... (el Update sigue igual)```
+
+### **¿Cómo Funciona Ahora?**
+
+1.  **Frame 1:** La `StatefulSequence` ejecuta el `Selector` (el personaje se mueve/salta). Tiene éxito. Luego ejecuta `WaitTask`.
+2.  **`WaitTask` devuelve `false`**. La `StatefulSequence` ve esto y dice: "¡Ajá! El hijo en el índice 1 (el `WaitTask`) está ocupado. Guardaré ese `1` en mi memoria y fallaré por ahora".
+3.  **Frame 2:** El `Update` se ejecuta de nuevo. La `StatefulSequence` se activa y piensa: "La última vez me quedé en el hijo 1, así que **continuaré desde ahí**".
+4.  **No ejecuta el `Selector` de nuevo**, sino que va directamente a `WaitTask`.
+5.  `WaitTask` sigue contando y devolviendo `false`. La `StatefulSequence` sigue esperando pacientemente en ese nodo.
+6.  **Cuando el contador de `WaitTask` termina, devuelve `true`**. La `StatefulSequence` ve el éxito, completa su ejecución y reinicia su memoria a `0` para que el ciclo pueda empezar de nuevo en el siguiente `Update`.
+
+Con este simple cambio, tu IA ahora se comportará exactamente como esperas: realizará una acción y luego se quedará **completamente quieta** hasta que el tiempo de espera termine.
