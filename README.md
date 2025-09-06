@@ -433,109 +433,174 @@ Ahora, cuando el objetivo esté lejos, la IA se pondrá a saltar. Cuando acerque
 
 
 .
+
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
+
 .
 
 
-¡Excelente observación! Tienes toda la razón. Este es un problema clásico y muy común cuando se implementan árboles de comportamiento, y has identificado el síntoma perfectamente.
+¡Excelente! Me disculpo. Tienes toda la razón, y es un punto crucial. Mi solución "simple" se desvió del requisito fundamental: **implementar el árbol de comportamiento del diagrama**.
 
-### **El Problema: ¿Por Qué No Espera?**
+El objetivo no es solo lograr el comportamiento, sino hacerlo **usando la estructura del árbol solicitada**.
 
-El problema no está en tu `WaitTask` (que funciona perfecto como un temporizador), sino en la lógica de la **`Sequence`**.
+Vamos a lograrlo de una manera que es **mucho más simple que la `StatefulSequence`**, pero que **sigue al 100% la estructura del diagrama**.
 
-1.  **Frame 1:** La `Sequence` ejecuta el `Selector`. El `Selector` tiene éxito (porque el personaje se mueve o salta). La `Sequence` pasa a su siguiente hijo: `WaitTask`.
-2.  **`WaitTask` empieza a contar** y, como el tiempo aún no ha pasado, devuelve `false`.
-3.  Como `WaitTask` devolvió `false`, **toda la `Sequence` falla en ese frame**.
-4.  **Frame 2 (el siguiente `Update`):** El árbol se ejecuta de nuevo **desde el principio**. La `Sequence` vuelve a ejecutar el `Selector`, el personaje se mueve o salta OTRA VEZ, y solo después el `WaitTask` avanza un poquito más en su conteo.
+### **La Solución Simple y Fiel al Diagrama**
 
-En resumen: **La acción se repite en cada frame porque la `Sequence` no tiene memoria. Reinicia su lógica en cada `Update`.**
+El truco es pensar en la `WaitTask` de forma diferente. En lugar de que la tarea *contenga* la lógica de la espera, la tarea simplemente le dirá al `AI_Controller` que **active un "modo de espera"**. El controlador, que ya se ejecuta en cada frame, manejará el temporizador.
 
----
+De esta forma, el árbol se ejecuta, la `WaitTask` se activa, y luego el controlador detiene la ejecución del árbol hasta que termine la espera.
 
-### **La Solución: Una Secuencia con "Memoria" (`StatefulSequence`)**
+**1. Modifica ÚNICAMENTE la `WaitTask`**
 
-Para solucionar esto de una manera limpia y reutilizable (sin alterar el resto de tu arquitectura), crearemos una nueva clase que herede de `Sequence` pero que sea "inteligente". La llamaremos `StatefulSequence`.
+Esta es la clave. La `WaitTask` necesita una forma de comunicarse con el `AI_Controller`. Le pasaremos una referencia al controlador cuando la creemos.
 
-Esta secuencia recordará qué hijo fue el último que estaba "ocupado" (el que devolvió `false`) y, en el siguiente frame, continuará desde ese punto en lugar de empezar desde cero.
-
-**1. Crea la nueva clase `StatefulSequence`**
-
-Añade esta clase a tu archivo de nodos. Es idéntica a `Sequence`, pero con una pequeña variable para recordar su estado.
+**Script: `AI_Nodes.cs` (o donde tengas los nodos)**
 
 ```csharp
-// Añade esta clase a tu archivo de nodos (AI_Nodes.cs o Node.cs)
+// (Las clases Node, Composite, Task, Root, Sequence, Selector, CheckDistanceSelector, MoveTask, JumpTask, etc. se quedan EXACTAMENTE IGUAL que en nuestra primera versión funcional)
 
-public class StatefulSequence : Sequence
+// --- VERSIÓN MODIFICADA DE WaitTask ---
+// Esta es la única clase de nodo que necesitamos cambiar.
+public class WaitTask : Task
 {
-    private int _lastRunningChildIndex = 0; // La "memoria" de la secuencia
+    // Una referencia al controlador para poder decirle que empiece a esperar.
+    private AI_Controller _controller;
 
-    public StatefulSequence(List<Node> childrenNodes) : base(childrenNodes) { }
+    public WaitTask(AI_Controller controller)
+    {
+        _controller = controller;
+    }
 
     public override bool Execute(GameObject agent)
     {
-        // Empezamos a iterar desde el último hijo que estaba "ocupado"
-        for (int i = _lastRunningChildIndex; i < children.Count; i++)
-        {
-            if (!children[i].Execute(agent))
-            {
-                // Si un hijo falla (como el WaitTask mientras espera),
-                // guardamos su índice y fallamos por ahora.
-                _lastRunningChildIndex = i;
-                return false;
-            }
-        }
-
-        // Si todos los hijos tuvieron éxito, reiniciamos la memoria para la próxima vez.
-        _lastRunningChildIndex = 0;
+        // La única misión de esta tarea es activar el modo de espera en el controlador.
+        _controller.StartWait(); 
+        
+        // La tarea en sí misma siempre se completa instantáneamente con éxito.
         return true;
     }
-}```
+}
+```
 
-**2. Actualiza el `AI_Controller` para que use la nueva secuencia**
+**2. Actualiza el `AI_Controller` para que Maneje la Espera**
 
-Este es el único cambio que necesitas hacer en tu controlador. Simplemente reemplaza `new Sequence(...)` por `new StatefulSequence(...)`.
+Ahora, el controlador tendrá una pequeña máquina de estados interna, pero seguirá ejecutando el árbol completo cuando sea el momento.
 
-**Script: `AI_Controller.cs` (La única línea que cambia)**
+**Script: `AI_Controller.cs` (Versión Final y Simple)**
 
 ```csharp
-// ... (el resto del script igual)
+using System.Collections.Generic;
+using UnityEngine;
 
-void Start()
+[RequireComponent(typeof(Rigidbody))]
+public class AI_Controller : MonoBehaviour
 {
-    // ... (el resto del Start igual)
-    
-    // 4. La secuencia principal que une todo.
-    //    ¡Aquí está el cambio! Usamos la nueva secuencia con memoria.
-    var mainSequence = new StatefulSequence(new List<Node> // <- CAMBIO AQUÍ
+    // --- Configuración visible en el Inspector ---
+    public Transform targetObject;
+    public float moveSpeed = 5f;
+    public float jumpForce = 7f;
+    public float validDistance = 15f;
+    public float waitTime = 2f;
+
+    private Root _behaviorTree;
+    private bool _isWaiting = false; // Flag para saber si estamos en modo de espera
+    private float _waitTimer = 0f;
+
+    void Start()
     {
-        mainSelector,
-        waitNode
-    });
+        Rigidbody rb = GetComponent<Rigidbody>();
 
-    // 5. El nodo raíz que inicia todo el árbol.
-    _behaviorTree = new Root(mainSequence);
+        // --- CONSTRUIMOS EL ÁRBOL EXACTAMENTE COMO LO PIDE EL DIAGRAMA ---
+        
+        // Creamos todos los nodos, incluyendo el WaitTask.
+        // ¡Importante! Le pasamos 'this' (una referencia a este mismo script) al WaitTask.
+        var waitNode = new WaitTask(this); 
+        var moveNode = new MoveTask(targetObject, moveSpeed);
+        var jumpNode = new JumpTask(rb, jumpForce);
+
+        var checkDistanceNode = new CheckDistanceSelector(
+            targetObject, 
+            validDistance, 
+            new List<Node> { moveNode }
+        );
+
+        var mainSelector = new SimpleSelector(new List<Node>
+        {
+            checkDistanceNode,
+            jumpNode
+        });
+
+        var mainSequence = new Sequence(new List<Node>
+        {
+            mainSelector,
+            waitNode // El WaitTask es el último hijo de la secuencia
+        });
+
+        _behaviorTree = new Root(mainSequence);
+    }
+
+    void Update()
+    {
+        // Si estamos en modo de espera, solo manejamos el temporizador.
+        if (_isWaiting)
+        {
+            _waitTimer += Time.deltaTime;
+            if (_waitTimer >= waitTime)
+            {
+                _isWaiting = false; // Se acabó la espera
+            }
+        }
+        // Si NO estamos esperando, ejecutamos el árbol de comportamiento.
+        else
+        {
+            if (_behaviorTree != null)
+            {
+                _behaviorTree.Execute(this.gameObject);
+            }
+        }
+    }
+
+    // Este es un método PÚBLICO que el WaitTask puede llamar.
+    public void StartWait()
+    {
+        if (!_isWaiting)
+        {
+            Debug.Log("Iniciando espera...");
+            _isWaiting = true;
+            _waitTimer = 0f;
+        }
+    }
 }
+```
 
-// ... (el Update sigue igual)```
+### **Resumen de Por Qué Esta Solución es la Mejor**
 
-### **¿Cómo Funciona Ahora?**
+*   **Cumple al 100% con el Diagrama:** La estructura del árbol (`Root` -> `Sequence` -> `Selector` / `WaitTask`) está perfectamente implementada en el método `Start()`.
+*   **Es Simple:** No requiere clases complejas con "memoria" como `StatefulSequence`. La lógica es muy clara: el `Update` o espera, o ejecuta el árbol.
+*   **Funciona Correctamente:** El personaje realizará una acción (moverse o saltar), la `Sequence` ejecutará la `WaitTask`, esta activará el modo de espera en el controlador, y el controlador detendrá toda ejecución del árbol hasta que el tiempo pase.
 
-1.  **Frame 1:** La `StatefulSequence` ejecuta el `Selector` (el personaje se mueve/salta). Tiene éxito. Luego ejecuta `WaitTask`.
-2.  **`WaitTask` devuelve `false`**. La `StatefulSequence` ve esto y dice: "¡Ajá! El hijo en el índice 1 (el `WaitTask`) está ocupado. Guardaré ese `1` en mi memoria y fallaré por ahora".
-3.  **Frame 2:** El `Update` se ejecuta de nuevo. La `StatefulSequence` se activa y piensa: "La última vez me quedé en el hijo 1, así que **continuaré desde ahí**".
-4.  **No ejecuta el `Selector` de nuevo**, sino que va directamente a `WaitTask`.
-5.  `WaitTask` sigue contando y devolviendo `false`. La `StatefulSequence` sigue esperando pacientemente en ese nodo.
-6.  **Cuando el contador de `WaitTask` termina, devuelve `true`**. La `StatefulSequence` ve el éxito, completa su ejecución y reinicia su memoria a `0` para que el ciclo pueda empezar de nuevo en el siguiente `Update`.
-
-Con este simple cambio, tu IA ahora se comportará exactamente como esperas: realizará una acción y luego se quedará **completamente quieta** hasta que el tiempo de espera termine.
+Esta es la forma más limpia y directa de cumplir con todos los requisitos de tu trabajo.
