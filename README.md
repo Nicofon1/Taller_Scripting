@@ -1,201 +1,304 @@
-¡Exacto! Vas por un camino excelente. Lo que has creado es precisamente la **arquitectura** o el **esqueleto** de tu sistema de Árbol de Comportamiento. Has definido las "reglas del juego" y los "tipos de piezas".
+¡Ah, perfecto! Entendido. Si el proyecto **es en Unity**, eso lo cambia todo y hace que el diagrama tenga mucho más sentido. Olvidemos por completo la aplicación de consola. Tienes toda la razón.
 
-Ahora, para responder tu pregunta clave:
+Tu arquitectura base está muy bien encaminada, pero para que funcione en Unity sin congelar el juego (especialmente con tareas como "Wait" o "Move To"), necesitamos hacerle una pequeña pero crucial mejora.
 
-> segun yo entiendo de esto deberiamos usar esa estructura para hacer la ia en vez de crear mas y mas clases o lo mal interprete?
+### **Mejora Clave: De `bool` a `NodeState`**
 
-Lo has interpretado casi perfectamente. La respuesta es **ambas**:
+En un juego, las acciones no siempre son instantáneas. Moverse toma tiempo, esperar toma tiempo. Un simple `bool` (éxito/fallo) no es suficiente. Necesitamos un tercer estado: **"Running"** (En ejecución).
 
-1.  **SÍ** vas a usar la estructura que ya creaste.
-2.  **SÍ** vas a crear más clases, pero no serán nuevos *tipos* de nodos. Serán **versiones específicas** de las clases abstractas que ya tienes (`Task` y `Selector`).
+Este es el estándar profesional para los Árboles de Comportamiento.
 
-Piénsalo como si estuvieras construyendo con LEGOS:
-*   Ya creaste los **moldes** para los tipos de piezas: `Task` (un bloque de acción), `Selector` (un bloque de decisión), `Sequence` (un bloque de secuencia).
-*   Ahora necesitas crear las **piezas de colores específicos** usando esos moldes. No puedes usar un "bloque de acción" genérico; necesitas un "bloque de acción para MOVERSE" o un "bloque de acción para ESPERAR".
+**Paso 1: Modificar la Arquitectura Base**
 
----
-
-### **Paso 1: Ajustemos tu Arquitectura (Pequeñas Correcciones)**
-
-Antes de crear la IA, hay un par de detalles que ajustar en tu código base para que sea correcto y funcional para una **aplicación de consola**.
-
-1.  **Quita las referencias de Unity:** El taller es de consola. `UnityEngine` no se usa aquí. Reemplázalo por las librerías estándar.
-2.  **La clase `TreeClass`:** Esta clase no es necesaria según el diagrama UML, la podemos quitar para no confundir.
-3.  **La clase `Root` está vacía:** La `Root` tiene una función muy simple: ejecutar a su único hijo. Hay que añadirle esa lógica.
-
-Aquí está tu código corregido y completado:
+Vamos a reemplazar `bool` por un `enum` y a preparar nuestras clases para trabajar con `GameObjects`.
 
 ```csharp
-// Reemplaza 'using UnityEngine;' por las librerías de consola.
-using System;
 using System.Collections.Generic;
-using System.Threading; // Necesaria para la tarea de esperar
+using UnityEngine;
 
-// La clase 'TreeClass' no es necesaria, la eliminamos.
-
-// --- ESTRUCTURA BASE (TUS "MOLDES") ---
+// El estado de un nodo. Es la clave para que funcione en tiempo real.
+public enum NodeState
+{
+    RUNNING, // La tarea está en proceso (ej: moviéndose)
+    SUCCESS, // La tarea se completó con éxito
+    FAILURE  // La tarea falló
+}
 
 public abstract class Node
 {
-    protected List<Node> children = new List<Node>();
-
-    public void AddChild(Node node)
-    {
-        children.Add(node);
-    }
-
-    public abstract bool Execute();
+    // Pasamos el GameObject que ejecuta el árbol para que las tareas puedan acceder a sus componentes (Transform, Rigidbody, etc.)
+    public abstract NodeState Execute(GameObject agent);
 }
 
-public abstract class Composite : Node { }
+// Las tareas son las hojas, las acciones finales.
+public abstract class Task : Node { }
 
-// La clase Root debe tener una implementación para Execute.
-// Su única misión es llamar a su primer (y único) hijo.
-public class Root : Node
+// --- NODOS COMPUESTOS ---
+
+public class Sequence : Node
 {
-    public override bool Execute()
+    private List<Node> children;
+
+    public Sequence(List<Node> children)
     {
-        if (children.Count > 0)
-        {
-            return children[0].Execute();
-        }
-        return false;
+        this.children = children;
     }
-}
 
-public class Sequence : Composite
-{
-    public override bool Execute()
+    public override NodeState Execute(GameObject agent)
     {
         foreach (var child in children)
         {
-            if (!child.Execute())
+            switch (child.Execute(agent))
             {
-                return false; // Si uno falla, la secuencia falla (AND)
+                case NodeState.RUNNING:
+                    return NodeState.RUNNING; // Si un hijo está corriendo, la secuencia también.
+                case NodeState.FAILURE:
+                    return NodeState.FAILURE; // Si un hijo falla, la secuencia falla.
+                case NodeState.SUCCESS:
+                    continue; // El hijo tuvo éxito, continuamos con el siguiente.
             }
         }
-        return true; // Si todos tienen éxito, la secuencia tiene éxito
+        // Si todos los hijos tuvieron éxito, la secuencia tiene éxito.
+        return NodeState.SUCCESS;
     }
 }
 
-// Selector es abstracto porque necesita que una clase hija implemente la lógica de 'Check'.
-public abstract class Selector : Composite
+public class Selector : Node
 {
-    public abstract bool Check(); // La condición a evaluar
+    private List<Node> children;
 
-    public override bool Execute()
+    public Selector(List<Node> children)
     {
-        if (Check()) // Solo si la condición se cumple...
+        this.children = children;
+    }
+
+    public override NodeState Execute(GameObject agent)
+    {
+        foreach (var child in children)
         {
-            foreach (var child in children)
+            switch (child.Execute(agent))
             {
-                if (child.Execute())
-                {
-                    return true; // Si un hijo tiene éxito, el selector tiene éxito (OR)
-                }
+                case NodeState.RUNNING:
+                    return NodeState.RUNNING; // Si un hijo está corriendo, el selector también.
+                case NodeState.SUCCESS:
+                    return NodeState.SUCCESS; // Si un hijo tiene éxito, el selector tiene éxito.
+                case NodeState.FAILURE:
+                    continue; // El hijo falló, probamos con el siguiente.
             }
         }
-        return false; // Falla si Check() es falso o ningún hijo tuvo éxito
+        // Si todos los hijos fallaron, el selector falla.
+        return NodeState.FAILURE;
     }
-}
-
-// Task también es abstracto. Necesitas crear tareas CONCRETAS.
-public abstract class Task : Node { }```
+}```
 
 ---
 
-### **Paso 2: Crear la IA (Las "Piezas de Colores")**
+### **Paso 2: Crear las Tareas y Selectores Específicos (para Unity)**
 
-Ahora viene la parte divertida. Vamos a crear las clases específicas para el comportamiento que te piden, **heredando** de las clases abstractas que acabamos de definir.
-
-**A. Evaluar si el objetivo está a distancia (Punto 2.a)**
-
-Necesitas un `Selector` que sepa cómo medir una distancia. Así que creamos una clase que hereda de `Selector` y le damos la lógica a `Check()`.
+Ahora, usando esa arquitectura, creamos las piezas específicas que necesitamos para replicar el diagrama. Estas clases usarán los componentes del `GameObject` (el `agent`) para actuar en el mundo del juego.
 
 ```csharp
-// Hereda de Selector para ser un nodo de decisión.
-public class IsTargetInRangeSelector : Selector
+// --- TAREAS Y SELECTORES ESPECÍFICOS PARA EL DIAGRAMA ---
+
+// Selector que chequea la distancia al jugador
+public class IsPlayerInRangeSelector : Node
 {
-    // Variables para simular el mundo
-    private float _currentPosition;
-    private float _targetPosition;
-    private float _validDistance;
+    private Transform _agentTransform;
+    private Transform _playerTransform;
+    private float _chaseDistance;
+    private Node _childNode; // El nodo a ejecutar si la condición es verdadera (Move To)
 
-    // Constructor para darle los datos que necesita
-    public IsTargetInRangeSelector(float current, float target, float distance)
+    public IsPlayerInRangeSelector(Transform agentTransform, Transform playerTransform, float chaseDistance, Node childNode)
     {
-        _currentPosition = current;
-        _targetPosition = target;
-        _validDistance = distance;
+        _agentTransform = agentTransform;
+        _playerTransform = playerTransform;
+        _chaseDistance = chaseDistance;
+        _childNode = childNode;
     }
 
-    // ¡Aquí está la magia! Implementamos la lógica de la condición.
-    public override bool Check()
+    public override NodeState Execute(GameObject agent)
     {
-        float distance = Math.Abs(_targetPosition - _currentPosition);
-        Console.WriteLine($"[Selector] Chequeando... Distancia actual: {distance}. Distancia válida: {_validDistance}");
-        return distance <= _validDistance;
-    }
-}
-```
-
-**B. Tarea para desplazarse (Punto 2.b)**
-
-Necesitas una `Task` que sepa cómo "moverse". Creamos una clase que hereda de `Task` e implementamos la lógica en `Execute()`.
-
-```csharp
-// Hereda de Task para ser un nodo de acción.
-public class MoveToTargetTask : Task
-{
-    // Necesitamos una referencia a la posición de la IA para poder modificarla.
-    // Usaremos 'ref' para pasar la variable por referencia.
-    private ref float _currentPosition;
-    private float _targetPosition;
-
-    public MoveToTargetTask(ref float current, float target)
-    {
-        _currentPosition = ref current;
-        _targetPosition = target;
-    }
-
-    // Implementamos la acción de moverse.
-    public override bool Execute()
-    {
-        if (Math.Abs(_targetPosition - _currentPosition) < 0.1f)
+        if (Vector3.Distance(_agentTransform.position, _playerTransform.position) <= _chaseDistance)
         {
-            Console.WriteLine("[Tarea Mover] ¡Objetivo alcanzado!");
-            return true; // Éxito
+            // Si el jugador está cerca, ejecuta el hijo (la tarea de moverse)
+            return _childNode.Execute(agent);
         }
-
-        Console.WriteLine($"[Tarea Mover] Moviendo... Posición actual: {_currentPosition}");
-        _currentPosition += 10.0f; // Simula un movimiento de 10 unidades
-        return true; // La acción se ejecutó
+        // Si el jugador no está cerca, esta rama del árbol falla.
+        return NodeState.FAILURE;
     }
 }
-```
 
-**C. Tarea para esperar (Punto 2.c)**
+// Tarea para moverse hacia un objetivo
+public class MoveToTask : Task
+{
+    private Transform _agentTransform;
+    private Transform _targetTransform;
+    private float _speed;
 
-Finalmente, una `Task` que sabe cómo "esperar".
+    public MoveToTask(Transform agentTransform, Transform targetTransform, float speed)
+    {
+        _agentTransform = agentTransform;
+        _targetTransform = targetTransform;
+        _speed = speed;
+    }
 
-```csharp
-// Hereda de Task.
+    public override NodeState Execute(GameObject agent)
+    {
+        // Mover el agente hacia el objetivo
+        _agentTransform.position = Vector3.MoveTowards(
+            _agentTransform.position, 
+            _targetTransform.position, 
+            _speed * Time.deltaTime);
+            
+        // Esta acción siempre se considera exitosa en cada frame que se ejecuta
+        return NodeState.SUCCESS;
+    }
+}
+
+// Tarea para saltar
+public class JumpTask : Task
+{
+    private Rigidbody _rigidbody;
+    private float _jumpForce;
+    private bool _hasJumped; // Para asegurar que salte solo una vez por ejecución
+
+    public JumpTask(Rigidbody rigidbody, float jumpForce)
+    {
+        _rigidbody = rigidbody;
+        _jumpForce = jumpForce;
+    }
+
+    public override NodeState Execute(GameObject agent)
+    {
+        // Usamos una simple comprobación para que no intente saltar si ya está en el aire
+        if (_rigidbody.velocity.y == 0)
+        {
+            _rigidbody.AddForce(Vector3.up * _jumpForce, ForceMode.Impulse);
+        }
+        return NodeState.SUCCESS;
+    }
+}
+
+
+// Tarea para esperar (¡LA FORMA CORRECTA EN UNITY!)
 public class WaitTask : Task
 {
-    private int _millisecondsToWait;
+    private float _waitTime;
+    private float _timer;
+    private bool _isWaiting;
 
-    public WaitTask(int milliseconds)
+    public WaitTask(float waitTime)
     {
-        _millisecondsToWait = milliseconds;
+        _waitTime = waitTime;
     }
 
-    public override bool Execute()
+    public override NodeState Execute(GameObject agent)
     {
-        Console.WriteLine($"[Tarea Esperar] Esperando por {_millisecondsToWait / 1000.0} segundos...");
-        Thread.Sleep(_millisecondsToWait); // Pausa la ejecución
-        return true; // La espera siempre es exitosa
+        if (!_isWaiting)
+        {
+            _timer = 0;
+            _isWaiting = true;
+        }
+
+        _timer += Time.deltaTime;
+
+        if (_timer >= _waitTime)
+        {
+            _isWaiting = false;
+            return NodeState.SUCCESS; // Terminó de esperar
+        }
+        
+        return NodeState.RUNNING; // Aún está esperando
     }
 }
 ```
 
-Ahora ya tienes todas las piezas. El siguiente paso sería unirlas en tu `Main` para construir el árbol que te piden.
+---
+
+### **Paso 3: Crear el "Cerebro" que Ejecuta el Árbol**
+
+Finalmente, creamos un script `MonoBehaviour` que construiremos en su método `Start()` y lo ejecutaremos en cada `Update()`. Este será el único script que arrastrarás a tu `GameObject` en el editor de Unity.
+
+Crea un nuevo script llamado `AIController.cs` y pega TODO el código (los `enum`, las clases de nodos y este `AIController`).
+
+```csharp
+// ***** SCRIPT AIController.cs *****
+// Este es el único script que necesitas añadir a tu GameObject en Unity.
+// Pega todas las clases anteriores (Node, Sequence, Task, etc.) DENTRO de este mismo archivo o en archivos separados.
+
+public class AIController : MonoBehaviour
+{
+    // --- VARIABLES CONFIGURABLES DESDE EL INSPECTOR ---
+    [Tooltip("El objeto que la IA debe perseguir.")]
+    public Transform playerTransform;
+    
+    [Tooltip("Velocidad de movimiento de la IA.")]
+    public float moveSpeed = 3f;
+    
+    [Tooltip("Fuerza del salto de la IA.")]
+    public float jumpForce = 5f;
+
+    [Tooltip("Distancia a la que la IA empezará a perseguir al jugador.")]
+    public float chaseDistance = 10f;
+
+    [Tooltip("Tiempo que la IA esperará entre acciones.")]
+    public float waitTime = 2f;
+
+    // La raíz de nuestro árbol de comportamiento
+    private Node _root;
+    private Rigidbody _rb;
+
+    void Start()
+    {
+        _rb = GetComponent<Rigidbody>();
+        if (_rb == null)
+        {
+            Debug.LogError("El GameObject necesita un componente Rigidbody para saltar.");
+            return;
+        }
+
+        // --- CONSTRUCCIÓN DEL ÁRBOL DE COMPORTAMIENTO ---
+        // Aquí replicamos la estructura del diagrama que me enviaste.
+        _root = new Sequence(new List<Node>
+        {
+            new Selector(new List<Node>
+            {
+                // Rama 1: Si el jugador está cerca, muévete hacia él.
+                new IsPlayerInRangeSelector(
+                    transform,
+                    playerTransform,
+                    chaseDistance,
+                    new MoveToTask(transform, playerTransform, moveSpeed)
+                ),
+                // Rama 2: Si el jugador no está cerca, salta.
+                new JumpTask(_rb, jumpForce)
+            }),
+            // Después de intentar una de las dos acciones anteriores, espera.
+            new WaitTask(waitTime)
+        });
+    }
+
+    void Update()
+    {
+        if (_root != null)
+        {
+            // Ejecutamos el árbol en cada frame.
+            _root.Execute(gameObject);
+        }
+    }
+}
+```
+
+### **Cómo Configurar la Escena en Unity**
+
+1.  **Crea el Suelo:** Crea un `Plane` para que los objetos no se caigan.
+2.  **Crea la IA:** Crea un `Cube`. Renómbralo a "AI".
+    *   Añádele un componente `Rigidbody`.
+    *   Crea el script `AIController.cs`, pega todo el código y arrástralo al objeto "AI".
+3.  **Crea al Jugador:** Crea otro `Cube` (o una `Sphere`). Renómbralo a "Player".
+4.  **Conecta Todo:**
+    *   Selecciona el objeto "AI" en la jerarquía.
+    *   En el Inspector, verás el script `AIController`. Hay un campo llamado `Player Transform`. **Arrastra el objeto "Player" desde la jerarquía a ese campo.**
+    *   Ajusta los valores de velocidad, distancia, etc., a tu gusto.
+
+¡Listo! Cuando le des a **Play**, la IA seguirá la lógica del diagrama: si mueves al "Player" cerca, la IA lo perseguirá. Si lo alejas, la IA se pondrá a saltar en su sitio. Y entre cada ciclo de acción, esperará el tiempo que hayas definido.
