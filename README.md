@@ -262,3 +262,171 @@ public class AI_Controller : MonoBehaviour
 4.  Crea otro objeto (`Sphere`, `Cube`, etc.) y llámalo "Objetivo".
 5.  Selecciona el objeto "IA". En el Inspector, verás el campo `Target Object`. **Arrastra el objeto "Objetivo" a ese campo.**
 6.  Dale a **Play**. Verás los mensajes de `Debug.Log` en la consola. Si el "Objetivo" está lejos, la IA se quedará quieta (porque el selector falla). Si acercas el "Objetivo", la IA empezará a moverse hacia él y a esperar en ciclos. ¡Has cumplido todos los requisitos del taller
+
+
+
+ .
+
+ .
+
+ .
+
+ .
+
+ .
+
+ ¡Absolutamente! Tienes toda la razón, había omitido la tarea de `Jump` del nuevo diagrama. Es un excelente punto y nos da la oportunidad de hacer el árbol de comportamiento aún más interesante.
+
+Vamos a integrar la lógica del salto (`Jump`) exactamente como lo pide el nuevo diagrama. La estructura general que teníamos es perfecta; solo necesitamos añadir una nueva tarea y reensamblar el árbol en el script del controlador.
+
+---
+
+### **Paso 1: Mantener la Arquitectura Base (Sin Cambios)**
+
+La arquitectura que definimos en el paso anterior (`Node`, `Composite`, `Task`, `Root`, `Sequence`, `Selector`) es perfecta y no necesita ningún cambio. Es la base sólida sobre la que construiremos.
+
+---
+
+### **Paso 2: Añadir la Nueva Tarea de Salto (`JumpTask`)**
+
+Necesitamos una nueva "pieza de LEGO": una tarea que sepa cómo hacer que el `GameObject` salte. La añadiremos a nuestro conjunto de nodos de IA.
+
+**Script: `AI_Nodes.cs` (o donde tengas los otros nodos)**
+
+```csharp
+// (Aquí irían las clases CheckDistanceSelector, MoveTask y WaitTask que ya hicimos)
+
+// NUEVA TAREA: Una Tarea que hace que el agente salte.
+public class JumpTask : Task
+{
+    private Rigidbody _rigidbody;
+    private float _jumpForce;
+    private bool _isGrounded => _rigidbody.velocity.y == 0; // Una forma simple de saber si está en el suelo
+
+    public JumpTask(Rigidbody rigidbody, float jumpForce)
+    {
+        _rigidbody = rigidbody;
+        _jumpForce = jumpForce;
+    }
+
+    public override bool Execute(GameObject agent)
+    {
+        // Solo saltamos si el Rigidbody existe y si está en el suelo
+        if (_rigidbody != null && _isGrounded)
+        {
+            _rigidbody.AddForce(Vector3.up * _jumpForce, ForceMode.Impulse);
+            Debug.Log("¡Saltando!");
+            return true; // El salto fue exitoso
+        }
+        
+        // Si ya está en el aire o no tiene Rigidbody, la acción falla para que el árbol no se quede atascado.
+        return false;
+    }
+}
+
+// NECESITAREMOS ESTO: Un Selector simple que no tiene condición propia.
+// Su único trabajo es ejecutar a sus hijos hasta que uno tenga éxito (pura lógica OR).
+public class SimpleSelector : Selector
+{
+    public SimpleSelector(List<Node> children) : base(children) { }
+
+    // Su condición siempre es verdadera para que pueda intentar ejecutar a sus hijos.
+    public override bool Check(GameObject agent)
+    {
+        return true;
+    }
+}
+```
+
+---
+
+### **Paso 3: Reconstruir el Árbol en el Controlador**
+
+Aquí es donde aplicamos la lógica del nuevo diagrama. Modificaremos el método `Start()` de nuestro `AI_Controller` para que conecte los nodos en la nueva jerarquía.
+
+**Script: `AI_Controller.cs` (Versión Actualizada)**
+
+```csharp
+using System.Collections.Generic;
+using UnityEngine;
+
+// Es recomendable tener un Rigidbody para las físicas de salto.
+[RequireComponent(typeof(Rigidbody))]
+public class AI_Controller : MonoBehaviour
+{
+    // --- Configuración visible en el Inspector de Unity ---
+    public Transform targetObject;
+    public float moveSpeed = 5f;
+    public float jumpForce = 7f; // Nueva variable para la fuerza del salto
+    public float validDistance = 15f;
+    public float waitTime = 2f;
+
+    private Root _behaviorTree;
+    private Rigidbody _rb; // Referencia al Rigidbody
+
+    void Start()
+    {
+        _rb = GetComponent<Rigidbody>();
+
+        // --- CONSTRUIR EL ÁRBOL DE COMPORTAMIENTO SEGÚN EL NUEVO DIAGRAMA ---
+        // Lo construiremos de adentro hacia afuera para que sea más fácil de leer.
+
+        // 1. Las acciones finales (las hojas del árbol)
+        var moveNode = new MoveTask(targetObject, moveSpeed);
+        var jumpNode = new JumpTask(_rb, jumpForce);
+        var waitNode = new WaitTask(waitTime);
+
+        // 2. El selector de distancia que tiene como hijo a la tarea de moverse.
+        var checkDistanceNode = new CheckDistanceSelector(
+            targetObject, 
+            validDistance, 
+            new List<Node> { moveNode }
+        );
+
+        // 3. El selector principal, que elige entre "perseguir" (checkDistanceNode) o "saltar" (jumpNode).
+        // Si el checkDistanceNode falla (porque el objetivo está lejos), intentará ejecutar jumpNode.
+        var mainSelector = new SimpleSelector(new List<Node>
+        {
+            checkDistanceNode,
+            jumpNode
+        });
+
+        // 4. La secuencia raíz que ejecuta el selector de acción y LUEGO la tarea de esperar.
+        var mainSequence = new Sequence(new List<Node>
+        {
+            mainSelector,
+            waitNode
+        });
+
+        // 5. El nodo raíz que inicia todo el árbol.
+        _behaviorTree = new Root(mainSequence);
+    }
+
+    void Update()
+    {
+        if (_behaviorTree != null)
+        {
+            _behaviorTree.Execute(this.gameObject);
+        }
+    }
+}
+```
+
+### **Lógica del Nuevo Árbol (en español)**
+
+Lo que acabamos de construir se traduce en el siguiente comportamiento:
+
+1.  **SECUENCIA principal:** "Primero, haz una acción. Si la hiciste con éxito, ENTONCES espera."
+2.  **La "acción" es un SELECTOR:** "Intenta hacer lo siguiente:
+    *   **Opción A:** ¿Está el jugador cerca? Si la respuesta es SÍ, muévete hacia él. (Si esto tiene éxito, el selector termina feliz).
+    *   **Opción B:** Si la Opción A falló (porque el jugador está lejos), entonces SALTA."
+3.  **La "espera":** Después de haberse movido o saltado, el `WaitTask` se ejecuta, creando una pausa.
+
+### **Cómo Actualizar en Unity**
+
+1.  Asegúrate de que tu `GameObject` "IA" tenga un componente **Rigidbody**. Si no lo tiene, añádelo. El script `[RequireComponent]` lo hará por ti si lo arrastras de nuevo.
+2.  Actualiza el script `AI_Controller.cs` con el nuevo código.
+3.  Selecciona tu "IA" y verás la nueva variable `Jump Force` en el Inspector. Dale un valor (ej: 7).
+4.  ¡Dale a **Play**!
+
+Ahora, cuando el objetivo esté lejos, la IA se pondrá a saltar. Cuando acerques el objetivo, dejará de saltar y comenzará a perseguirlo. ¡Exactamente como en el diagrama
